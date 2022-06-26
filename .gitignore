@@ -1,0 +1,7 @@
+*.txt
+.DS_Store
+*.json
+*.exe
+thcount
+*.zip
+*.log
