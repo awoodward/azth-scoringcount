@@ -7,14 +7,18 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/tarm/serial"
@@ -28,7 +32,8 @@ const carStateFile = "carstate.json"
 const timeStateFile = "timestate.json"
 const totalCol = (clueNum * 2) + 1 + emergencyOffset
 
-var thCount *[carMax][totalCol]bool
+//var thCount *[carMax][totalCol]bool
+//var scanTime *[carMax]time.Time
 var quit bool
 var thCommand *string
 
@@ -37,7 +42,67 @@ type carTime struct {
 	checkIn  time.Time
 }
 
-var thTimes *[carMax]carTime
+type CarData struct {
+	CarNum        int
+	Scanned       bool
+	Emergencies   int
+	Clues         int
+	EmergencyList string
+	ClueList      string
+	ScanTime      time.Time
+}
+
+type CarPageData struct {
+	Title string
+	Cars  []CarData
+}
+
+//var thTimes *[carMax]carTime
+
+type countData struct {
+	thCount  *[carMax][totalCol]bool
+	scanTime *[carMax]time.Time
+	thTimes  *[carMax]carTime
+}
+
+func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	status(c)
+	query := req.URL.Path
+
+	log.Printf("Request Path : %v from: %v\n", query, req.RemoteAddr)
+	if strings.HasPrefix(query, "/download") {
+		timestr := time.Now().Format("2006-01-02_03-04")
+		filename := fmt.Sprintf("%v.txt", timestr)
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+		writeTextStream(c, w)
+		return
+	}
+	var carData CarPageData
+	carData.Cars = buildCarData(c)
+	carData.Title = "Cars!"
+	sortOrder := req.URL.Query().Get("sort")
+	switch sortOrder {
+	case "leader":
+		// Sort data by clues and emergencies
+		sort.SliceStable(carData.Cars, func(i, j int) bool {
+			if i == 0 {
+				// 0 index always first
+				//return false
+			}
+			if (carData.Cars[i].Scanned != carData.Cars[j].Scanned) && !carData.Cars[j].Scanned {
+				return true
+			}
+			if carData.Cars[j].Clues != carData.Cars[i].Clues {
+				return carData.Cars[j].Clues < carData.Cars[i].Clues
+			}
+			return carData.Cars[i].Emergencies < carData.Cars[j].Emergencies
+		})
+	}
+	//log.Printf("Sort: %v\n", sortOrder)
+	tmpl := template.Must(template.ParseFiles("templates/template.html"))
+	tmpl.Execute(w, carData)
+}
 
 const (
 	usage = `usage: %s
@@ -51,11 +116,11 @@ Options:
 `
 )
 
-func getCarEmergencies(car int) string {
+func getCarEmergencies(count *countData, car int) string {
 	// process emergencies
 	emergencies := ""
 	for i := 1 + emergencyOffset; i <= clueNum; i++ {
-		if thCount[car][i] == false {
+		if count.thCount[car][i] == false {
 			// emergency wasn't found so must've been opened
 			if len(emergencies) > 0 {
 				emergencies = emergencies + ", "
@@ -66,7 +131,7 @@ func getCarEmergencies(car int) string {
 	return emergencies
 }
 
-func getCarClues(car int) string {
+func getCarClues(count *countData, car int) string {
 	// This code is hideous but it works. Don't judge me.
 	type streak struct {
 		start int
@@ -79,16 +144,16 @@ func getCarClues(car int) string {
 	//currentStreak := new(streak)
 	end := clueOffset
 	start := 0
-	count := 0
+	clue := 0
 	// first handle rollover
-	if (thCount[car][clueOffset+clueNum] == false) && (thCount[car][clueOffset+1] == false) {
+	if (count.thCount[car][clueOffset+clueNum] == false) && (count.thCount[car][clueOffset+1] == false) {
 		// Z and A are populated
 		// find the start of the streak
 		first := 0
 		for i := clueNum; i >= 1; i-- {
-			if thCount[car][clueOffset+i] == false {
+			if count.thCount[car][clueOffset+i] == false {
 				first = i
-				count++
+				clue++
 			} else {
 				// start of streak found
 				currentStreak.start = first
@@ -96,13 +161,13 @@ func getCarClues(car int) string {
 				break
 			}
 		}
-		if count == clueNum {
+		if clue == clueNum {
 			// all clues found
 			currentStreak = streak{1, clueNum}
 		} else {
 			last := 0
 			for i := 1; i < end; i++ {
-				if thCount[car][clueOffset+i] == false {
+				if count.thCount[car][clueOffset+i] == false {
 					last = i
 				} else {
 					// start of streak found
@@ -116,10 +181,10 @@ func getCarClues(car int) string {
 		end--
 	}
 
-	if count != clueNum {
+	if clue != clueNum {
 		currentStreak = streak{0, 0}
 		for i := start + 1; i <= end; i++ {
-			if thCount[car][clueOffset+i] == false {
+			if count.thCount[car][clueOffset+i] == false {
 				// got a clue
 				if currentStreak.start == 0 {
 					currentStreak.start = i
@@ -154,36 +219,69 @@ func getCarClues(car int) string {
 	return strings.ToLower(streakStr)
 }
 
-func hasCars() bool {
-	count := 0
+func hasCars(count *countData) bool {
+	cars := 0
 	for i := 1; i < carMax; i++ {
-		if thCount[i][0] == false {
+		if count.thCount[i][0] == false {
 			// no scans for car
 			continue
 		}
-		count++
+		cars++
 	}
-	if count > 0 {
+	if cars > 0 {
 		return true
 	}
 	return false
 }
 
-func status() {
-	count := 0
+func status(count *countData) {
+	cars := 0
 	for i := 1; i < carMax; i++ {
-		if thCount[i][0] == false {
+		if count.thCount[i][0] == false {
 			// no scans for car
 			continue
 		}
-		count++
+		cars++
 	}
-	log.Printf("%v cars counted\n", count)
+	log.Printf("%v cars counted\n", cars)
 }
 
-func saveData() {
-	writeState()
-	if !hasCars() {
+func buildCarData(count *countData) []CarData {
+	carList := make([]CarData, carMax)
+	for i := 1; i < carMax; i++ {
+		var currentCar CarData
+		currentCar.CarNum = i
+		currentCar.Scanned = count.thCount[i][0]
+		emergencyStr := getCarEmergencies(count, i)
+		clueStr := getCarClues(count, i)
+		currentCar.EmergencyList = emergencyStr
+		currentCar.ClueList = clueStr
+		currentCar.Emergencies, currentCar.Clues = getSolveCount(count, i)
+		currentCar.Emergencies = clueNum - currentCar.Emergencies
+		currentCar.Clues = clueNum - currentCar.Clues
+		currentCar.ScanTime = count.scanTime[i]
+		carList[i] = currentCar
+	}
+	return carList
+}
+
+func writeTextStream(count *countData, f io.Writer) error {
+	carList := buildCarData(count)
+	for i := 1; i < carMax; i++ {
+		line := fmt.Sprintf("\t%v\t0\t%v\t%v\n", i, carList[i].ClueList, carList[i].EmergencyList)
+		_, err := io.WriteString(f, line)
+		if err != nil {
+			fmt.Println(err)
+			//f.Close()
+			return err
+		}
+	}
+	return nil
+}
+
+func saveData(count *countData) {
+	writeState(count)
+	if !hasCars(count) {
 		// nothing to save
 		log.Println("No data to save")
 		return
@@ -195,98 +293,113 @@ func saveData() {
 		fmt.Println(err)
 		return
 	}
-	count := 0
-	for i := 1; i < carMax; i++ {
-		if thCount[i][0] == false {
-			// no scans for car
-			//continue
-		}
-		emergencyStr := getCarEmergencies(i)
-		clueStr := getCarClues(i)
-		line := fmt.Sprintf("\t%v\t0\t%v\t%v\n", i, clueStr, emergencyStr)
-		l, err := f.WriteString(line)
-		if err != nil {
-			fmt.Println(err)
-			f.Close()
-			return
-		}
-		_ = l
-		count++
+	// Send the data to file
+	err = writeTextStream(count, f)
+	if err != nil {
+		log.Printf("Error saving data file: %v\n", err)
 	}
+
 	f.Close()
-	log.Printf("%v cars saved\n", count)
+	log.Printf("Data saved to file: %v\n", filename)
 }
 
-func processCode(code string) {
+func getSolveCount(count *countData, car int) (int, int) {
+	emergencies := 0
+	clues := 0
+	for i := 1; i < 53; i++ {
+		if count.thCount[car][i] == true {
+			if i <= clueNum {
+				emergencies++
+			} else {
+				clues++
+			}
+		}
+	}
+	return emergencies, clues
+}
+
+func processCode(count *countData, code string) bool {
+	if len(code) == 0 {
+		// Windows seems to return a zero length string
+		return true
+	}
 	features := strings.Split(code, "-")
 	if len(features) != 3 {
-		log.Printf("Invalid number of code segments %v\n", len(features))
-		return
+		//log.Printf("Invalid number of code segments (%v) %v (%v)\n", len(features), code, len(code))
+		return false
 	}
 	car, _ := strconv.Atoi(features[0])
-	thCount[car][0] = true
+	count.thCount[car][0] = true
 	cmd := features[1]
 	switch cmd {
 	case "QUIT":
-		saveData()
+		log.Println("Quitting...")
+		saveData(count)
 		quit = true
 	case "CLEAR":
 		if car == 0 {
-			saveData()
-			thCount = new([carMax][totalCol]bool)
-			thTimes = new([carMax]carTime)
+			saveData(count)
+			count.thCount = new([carMax][totalCol]bool)
+			count.thTimes = new([carMax]carTime)
 			log.Println("All data cleared")
 		} else {
 			// clear car
 			for i := 0; i < totalCol; i++ {
-				thCount[car][i] = false
+				count.thCount[car][i] = false
 			}
 			log.Printf("Car %v data cleared", car)
 		}
 	case "SAVE":
-		saveData()
+		saveData(count)
 	case "STATUS":
-		status()
+		status(count)
 	case "CL": // Clue
 		clue := features[2][0] // get the first character
 		clue = clue - 64
-		thCount[car][clueOffset+clue] = true
+		count.thCount[car][clueOffset+clue] = true
+		count.scanTime[car] = time.Now()
 	case "EM": // Emergency
 		emergency, _ := strconv.Atoi(features[2])
-		thCount[car][emergency] = true
+		count.thCount[car][emergency] = true
+		count.scanTime[car] = time.Now()
 	case "CA": // Car
 		switch *thCommand {
 		case "count":
-			emergencies := 0
-			clues := 0
-			for i := 1; i < 53; i++ {
-				if thCount[car][i] == true {
-					if i <= clueNum {
-						emergencies++
-					} else {
-						clues++
+			emergencies, clues := getSolveCount(count, car)
+			/*
+				emergencies := 0
+				clues := 0
+				for i := 1; i < 53; i++ {
+					if count.thCount[car][i] == true {
+						if i <= clueNum {
+							emergencies++
+						} else {
+							clues++
+						}
 					}
 				}
-			}
+			*/
 			//log.Printf("car: %v emergencies: %v clues: %v\n", car, emergencies, clues)
 			//log.Printf("car: %v emergency result %v clue result %v\n", car, getCarEmergencies(car), getCarClues(car))
 			fmt.Println("--------------------")
 			fmt.Printf("Car: %v scans: emergencies: %v \t clues: %v\n", car, emergencies, clues)
-			fmt.Printf("Car: %v emergencies opened (%v): %v \n", car, clueNum-emergencies, getCarEmergencies(car))
-			fmt.Printf("Car: %v clues visited (%v): %v\n", car, clueNum-clues, getCarClues(car))
+			fmt.Printf("Car: %v emergencies opened (%v): %v \n", car, clueNum-emergencies, getCarEmergencies(count, car))
+			fmt.Printf("Car: %v clues visited (%v): %v\n", car, clueNum-clues, getCarClues(count, car))
 		case "checkin":
-			thTimes[car].checkIn = time.Now()
-			log.Printf("Car %v check-in time: %v\n", car, thTimes[car].checkIn.Format("15:04:05"))
+			count.thTimes[car].checkIn = time.Now()
+			log.Printf("Car %v check-in time: %v\n", car, count.thTimes[car].checkIn.Format("15:04:05"))
 		case "checkout":
-			thTimes[car].checkOut = time.Now()
-			log.Printf("Car %v check-out time: %v\n", car, thTimes[car].checkOut.Format("15:04:05"))
+			count.thTimes[car].checkOut = time.Now()
+			log.Printf("Car %v check-out time: %v\n", car, count.thTimes[car].checkOut.Format("15:04:05"))
 		}
 	}
+	return true
 }
 
-func worker(s *serial.Port, codes chan string, workerId int) {
+func worker(s *serial.Port, codes chan string, workerId int, count *countData) {
 	errorCount := 0
 	buf := make([]byte, 256)
+	lastVal := ""
 	for {
 		if quit {
 			return
@@ -302,21 +415,31 @@ func worker(s *serial.Port, codes chan string, workerId int) {
 		if err != nil {
 			if strings.Compare(err.Error(), "EOF") == 0 {
 				// Normal end-of-file - nothing to read
+				//log.Println("EOF")
 			} else {
 				log.Printf("Error: %v\n", err)
 				errorCount++
 			}
-		} else {
-			errorCount = 0
-			code := string(buf[:n])
-			code = strings.TrimSuffix(code, "\r")
-			code = strings.TrimSuffix(code, "\n")
-
-			//log.Printf("[%v]length: %v data: %q code: %v codeLen: %v\n", workerId, n, buf[:n], code, len(code))
-			processCode(code)
-			//data = append(data, buf[:n]...)
-			//codes <- code
+			continue
 		}
+		errorCount = 0
+		code := string(buf[:n])
+		//code = strings.TrimSuffix(code, "\r")
+		//code = strings.TrimSuffix(code, "\n")
+		code = strings.TrimSpace(code)
+		if len(code) == 0 {
+			continue
+		}
+		code = lastVal + code
+		//log.Printf("[%v]length: %v data: %q code: %v codeLen: %v\n", workerId, n, buf[:n], code, len(code))
+		valid := processCode(count, code)
+		if valid {
+			lastVal = ""
+		} else {
+			lastVal += code
+		}
+		//data = append(data, buf[:n]...)
+		//codes <- code
 	}
 
 }
@@ -325,7 +448,7 @@ func init() {
 	thCommand = flag.String("command", "count", "Current command")
 }
 
-func readState() {
+func readState(count *countData) {
 	_, err := os.Stat(carStateFile)
 	if os.IsNotExist(err) {
 		// doesn't exist; initialize it
@@ -336,7 +459,7 @@ func readState() {
 
 		// we unmarshal our byteArray which contains our
 		// jsonFile's content into 'users' which we defined above
-		json.Unmarshal(byteValue, &thCount)
+		json.Unmarshal(byteValue, &count.thCount)
 	}
 
 	_, err = os.Stat(timeStateFile)
@@ -349,16 +472,16 @@ func readState() {
 
 		// we unmarshal our byteArray which contains our
 		// jsonFile's content into 'users' which we defined above
-		json.Unmarshal(byteValue, &thTimes)
+		json.Unmarshal(byteValue, &count.thTimes)
 	}
 
 }
 
-func writeState() {
-	file, _ := json.MarshalIndent(thCount, "", " ")
+func writeState(count *countData) {
+	file, _ := json.MarshalIndent(count.thCount, "", " ")
 	ioutil.WriteFile(carStateFile, file, 0644)
 
-	file, _ = json.MarshalIndent(thTimes, "", " ")
+	file, _ = json.MarshalIndent(count.thTimes, "", " ")
 	ioutil.WriteFile(timeStateFile, file, 0644)
 }
 
@@ -414,24 +537,79 @@ func testPorts(p []string) []string {
 	return d
 }
 
+func GetOutboundIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	return localAddr.IP.String()
+}
+
+/*
+func getRoot(w http.ResponseWriter, req *http.Request) {
+	var carData CarPageData
+	carData.Cars = buildCarData()
+	carData.Title = "Cars!"
+	sortOrder := req.URL.Query().Get("sort")
+	switch sortOrder {
+	case "leader":
+		// Sort data by clues and emergencies
+		sort.SliceStable(carData.Cars, func(i, j int) bool {
+			if i == 0 {
+				// 0 index always first
+				//return false
+			}
+			if (carData.Cars[i].Scanned != carData.Cars[j].Scanned) && !carData.Cars[j].Scanned {
+				return true
+			}
+			if carData.Cars[j].Clues < carData.Cars[i].Clues {
+				return true
+			}
+			return carData.Cars[i].Emergencies < carData.Cars[j].Emergencies
+		})
+	}
+	//log.Printf("Sort: %v\n", sortOrder)
+	tmpl := template.Must(template.ParseFiles("templates/template.html"))
+	tmpl.Execute(w, carData)
+}
+
+func getDownload(w http.ResponseWriter, req *http.Request) {
+	timestr := time.Now().Format("2006-01-02_03-04")
+	filename := fmt.Sprintf("%v.txt", timestr)
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	writeTextStream(w)
+}
+*/
+
 func main() {
 	/*
-		thCount = new([carMax][53]bool)
-		//thCount[1][clueOffset+1] = true
-		//thCount[1][clueOffset+5] = true
-		//thCount[1][clueOffset+6] = true
-		//thCount[1][clueOffset+7] = true
-		thCount[1][clueOffset+13] = true
-		thCount[1][clueOffset+15] = true
-		//thCount[1][clueOffset+20] = true
+		count.thCount = new([carMax][53]bool)
+		//count.thCount[1][clueOffset+1] = true
+		//count.thCount[1][clueOffset+5] = true
+		//count.thCount[1][clueOffset+6] = true
+		//count.thCount[1][clueOffset+7] = true
+		count.thCount[1][clueOffset+13] = true
+		count.thCount[1][clueOffset+15] = true
+		//count.thCount[1][clueOffset+20] = true
 
 		result := getCarClues(1)
 		log.Println(result)
 		return
 	*/
 
-	thCount = new([carMax][totalCol]bool)
-	thTimes = new([carMax]carTime)
+	//thCount = new([carMax][totalCol]bool)
+	//thTimes = new([carMax]carTime)
+	//scanTime = new([carMax]time.Time)
+	var count countData
+	count.thCount = new([carMax][totalCol]bool)
+	count.thTimes = new([carMax]carTime)
+	count.scanTime = new([carMax]time.Time)
+
 	flag.Parse()
 	fmt.Println("Command: ", *thCommand)
 
@@ -446,7 +624,7 @@ func main() {
 	mw := io.MultiWriter(os.Stdout, f)
 	log.SetOutput(mw)
 
-	readState()
+	readState(&count)
 
 	osType := runtime.GOOS
 	var patterns []string
@@ -502,11 +680,23 @@ func main() {
 
 		//codes := make(chan string, 20)
 		wg.Add(1)
-		go func(i int) {
+		go func(i int, count *countData) {
 			defer wg.Done()
-			worker(s, nil, i)
-		}(i)
+			worker(s, nil, i, count)
+		}(i, &count)
 	}
+	// start HTTP as a function
+	myIp := GetOutboundIP()
+	fmt.Printf("listen on http://%v:8080\n", myIp)
+	mux := http.NewServeMux()
+	//mux.HandleFunc("/", getRoot)
+	mux.Handle("/", &count)
+	//mux.HandleFunc("/download", getDownload)
+	wg.Add(1)
+	go func(mux *http.ServeMux) {
+		defer wg.Done()
+		log.Fatal(http.ListenAndServe(":8080", mux))
+	}(mux)
 
 	wg.Wait()
 }

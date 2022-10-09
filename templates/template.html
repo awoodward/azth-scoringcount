@@ -1,0 +1,47 @@
+<h1>{{.Title}}</h1>
+<div>
+    <a href="/download">Download</a>
+</div>
+<div>
+    <table>
+        <tr>
+            <th><a href="/?sort=">Car</a></th>
+            <th>Scanned</th>
+            <th><a href="/?sort=leader">Clue<br>Count</a></th>
+            <th>Emergency<br>Count</th>
+            <th>Clues</th>
+            <th>Emergencies</th>
+            <th>Last Scan</th>
+        </tr>
+        {{range .Cars}}
+        {{if ne .CarNum 0 }}
+        {{if .Scanned}}
+        <tr class="done">
+            {{else}}
+        <tr class="notdone">
+            {{end}}
+            <td>{{.CarNum}}</td>
+            <td>{{.Scanned}}</td>
+            <td>{{.Clues}}</td>
+            <td>{{.Emergencies}}</td>
+            <td>{{.ClueList}}</td>
+            <td>{{.EmergencyList}}</td>
+            <td>{{.ScanTime.Format "Jan 02, 2006 15:04:05" }}</td>
+        </tr>
+        {{end}}
+        {{end}}
+    </table>
+</div>
+
+<style>
+    table,
+    th,
+    td {
+        border: 1px solid black;
+        border-collapse: collapse;
+    }
+    .notdone {
+        background-color: tomato;
+        opacity: .4;
+    }
+</style>
