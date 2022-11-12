@@ -24,16 +24,17 @@ import (
 	"github.com/tarm/serial"
 )
 
+// constants that effect the operation of the program
 const carMax = 100
-const emergencyOffset = 0
 const clueNum = 26
-const clueOffset = emergencyOffset + clueNum
+const scannerMax = 20
 const carStateFile = "carstate.json"
 const timeStateFile = "timestate.json"
+
+const emergencyOffset = 0 // emergencies are first in the matrix
+const clueOffset = emergencyOffset + clueNum
 const totalCol = (clueNum * 2) + 1 + emergencyOffset
 
-//var thCount *[carMax][totalCol]bool
-//var scanTime *[carMax]time.Time
 var quit bool
 var thCommand *string
 
@@ -52,35 +53,66 @@ type CarData struct {
 	ScanTime      time.Time
 }
 
+type TallyData struct {
+	TotalClues         int
+	CountedClues       int
+	TotalEmergencies   int
+	CountedEmergencies int
+}
+
+type ScannerData struct {
+	ScannerNum   int
+	ScanCount    int
+	LastScanTime time.Time
+}
+
 type CarPageData struct {
-	Title string
-	Cars  []CarData
+	Title    string
+	Cars     []CarData
+	Tally    TallyData
+	Scanners []ScannerData
 }
 
 //var thTimes *[carMax]carTime
 
 type countData struct {
+	debug    bool
 	thCount  *[carMax][totalCol]bool
 	scanTime *[carMax]time.Time
 	thTimes  *[carMax]carTime
+	scanners *[scannerMax]ScannerData
 }
 
 func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	status(c)
+	c.status()
 	query := req.URL.Path
 
 	log.Printf("Request Path : %v from: %v\n", query, req.RemoteAddr)
 	if strings.HasPrefix(query, "/download") {
+		c.saveData()
 		timestr := time.Now().Format("2006-01-02_03-04")
 		filename := fmt.Sprintf("%v.txt", timestr)
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-		writeTextStream(c, w)
+		c.writeTextStream(w)
 		return
 	}
+
+	if strings.HasPrefix(query, "/save") {
+		c.saveData()
+		return
+	}
+
 	var carData CarPageData
-	carData.Cars = buildCarData(c)
+	carData.Cars = c.buildCarData()
 	carData.Title = "Cars!"
+	carData.Tally = c.getTally()
+	carData.Scanners = make([]ScannerData, 0)
+	for i := 0; i < scannerMax; i++ {
+		if c.scanners[i].ScanCount > 0 {
+			carData.Scanners = append(carData.Scanners, c.scanners[i])
+		}
+	}
 	sortOrder := req.URL.Query().Get("sort")
 	switch sortOrder {
 	case "leader":
@@ -116,11 +148,11 @@ Options:
 `
 )
 
-func getCarEmergencies(count *countData, car int) string {
+func (c *countData) getCarEmergencies(car int) string {
 	// process emergencies
 	emergencies := ""
 	for i := 1 + emergencyOffset; i <= clueNum; i++ {
-		if count.thCount[car][i] == false {
+		if c.thCount[car][i] == false {
 			// emergency wasn't found so must've been opened
 			if len(emergencies) > 0 {
 				emergencies = emergencies + ", "
@@ -131,7 +163,7 @@ func getCarEmergencies(count *countData, car int) string {
 	return emergencies
 }
 
-func getCarClues(count *countData, car int) string {
+func (c *countData) getCarClues(car int) string {
 	// This code is hideous but it works. Don't judge me.
 	type streak struct {
 		start int
@@ -146,12 +178,12 @@ func getCarClues(count *countData, car int) string {
 	start := 0
 	clue := 0
 	// first handle rollover
-	if (count.thCount[car][clueOffset+clueNum] == false) && (count.thCount[car][clueOffset+1] == false) {
+	if (c.thCount[car][clueOffset+clueNum] == false) && (c.thCount[car][clueOffset+1] == false) {
 		// Z and A are populated
 		// find the start of the streak
 		first := 0
 		for i := clueNum; i >= 1; i-- {
-			if count.thCount[car][clueOffset+i] == false {
+			if c.thCount[car][clueOffset+i] == false {
 				first = i
 				clue++
 			} else {
@@ -167,7 +199,7 @@ func getCarClues(count *countData, car int) string {
 		} else {
 			last := 0
 			for i := 1; i < end; i++ {
-				if count.thCount[car][clueOffset+i] == false {
+				if c.thCount[car][clueOffset+i] == false {
 					last = i
 				} else {
 					// start of streak found
@@ -184,7 +216,7 @@ func getCarClues(count *countData, car int) string {
 	if clue != clueNum {
 		currentStreak = streak{0, 0}
 		for i := start + 1; i <= end; i++ {
-			if count.thCount[car][clueOffset+i] == false {
+			if c.thCount[car][clueOffset+i] == false {
 				// got a clue
 				if currentStreak.start == 0 {
 					currentStreak.start = i
@@ -219,10 +251,10 @@ func getCarClues(count *countData, car int) string {
 	return strings.ToLower(streakStr)
 }
 
-func hasCars(count *countData) bool {
+func (c *countData) hasCars() bool {
 	cars := 0
 	for i := 1; i < carMax; i++ {
-		if count.thCount[i][0] == false {
+		if c.thCount[i][0] == false {
 			// no scans for car
 			continue
 		}
@@ -234,10 +266,10 @@ func hasCars(count *countData) bool {
 	return false
 }
 
-func status(count *countData) {
+func (c *countData) status() {
 	cars := 0
 	for i := 1; i < carMax; i++ {
-		if count.thCount[i][0] == false {
+		if c.thCount[i][0] == false {
 			// no scans for car
 			continue
 		}
@@ -246,27 +278,27 @@ func status(count *countData) {
 	log.Printf("%v cars counted\n", cars)
 }
 
-func buildCarData(count *countData) []CarData {
+func (c *countData) buildCarData() []CarData {
 	carList := make([]CarData, carMax)
 	for i := 1; i < carMax; i++ {
 		var currentCar CarData
 		currentCar.CarNum = i
-		currentCar.Scanned = count.thCount[i][0]
-		emergencyStr := getCarEmergencies(count, i)
-		clueStr := getCarClues(count, i)
+		currentCar.Scanned = c.thCount[i][0]
+		emergencyStr := c.getCarEmergencies(i)
+		clueStr := c.getCarClues(i)
 		currentCar.EmergencyList = emergencyStr
 		currentCar.ClueList = clueStr
-		currentCar.Emergencies, currentCar.Clues = getSolveCount(count, i)
+		currentCar.Emergencies, currentCar.Clues = c.getSolveCount(i)
 		currentCar.Emergencies = clueNum - currentCar.Emergencies
 		currentCar.Clues = clueNum - currentCar.Clues
-		currentCar.ScanTime = count.scanTime[i]
+		currentCar.ScanTime = c.scanTime[i]
 		carList[i] = currentCar
 	}
 	return carList
 }
 
-func writeTextStream(count *countData, f io.Writer) error {
-	carList := buildCarData(count)
+func (c *countData) writeTextStream(f io.Writer) error {
+	carList := c.buildCarData()
 	for i := 1; i < carMax; i++ {
 		line := fmt.Sprintf("\t%v\t0\t%v\t%v\n", i, carList[i].ClueList, carList[i].EmergencyList)
 		_, err := io.WriteString(f, line)
@@ -279,9 +311,9 @@ func writeTextStream(count *countData, f io.Writer) error {
 	return nil
 }
 
-func saveData(count *countData) {
-	writeState(count)
-	if !hasCars(count) {
+func (c *countData) saveData() {
+	writeState(c)
+	if !c.hasCars() {
 		// nothing to save
 		log.Println("No data to save")
 		return
@@ -294,7 +326,7 @@ func saveData(count *countData) {
 		return
 	}
 	// Send the data to file
-	err = writeTextStream(count, f)
+	err = c.writeTextStream(f)
 	if err != nil {
 		log.Printf("Error saving data file: %v\n", err)
 	}
@@ -303,11 +335,11 @@ func saveData(count *countData) {
 	log.Printf("Data saved to file: %v\n", filename)
 }
 
-func getSolveCount(count *countData, car int) (int, int) {
+func (c *countData) getSolveCount(car int) (int, int) {
 	emergencies := 0
 	clues := 0
 	for i := 1; i < 53; i++ {
-		if count.thCount[car][i] == true {
+		if c.thCount[car][i] == true {
 			if i <= clueNum {
 				emergencies++
 			} else {
@@ -318,7 +350,7 @@ func getSolveCount(count *countData, car int) (int, int) {
 	return emergencies, clues
 }
 
-func processCode(count *countData, code string) bool {
+func (c *countData) processCode(code string) bool {
 	if len(code) == 0 {
 		// Windows seems to return a zero length string
 		return true
@@ -329,43 +361,48 @@ func processCode(count *countData, code string) bool {
 		return false
 	}
 	car, _ := strconv.Atoi(features[0])
-	count.thCount[car][0] = true
 	cmd := features[1]
+	// bounds checking
+	if car >= carMax {
+		log.Printf("Invalid car number %v. Max cars is %v. Command: %v\n", car, carMax, cmd)
+		return false
+	}
+	c.thCount[car][0] = true
 	switch cmd {
 	case "QUIT":
 		log.Println("Quitting...")
-		saveData(count)
+		c.saveData()
 		quit = true
 	case "CLEAR":
 		if car == 0 {
-			saveData(count)
-			count.thCount = new([carMax][totalCol]bool)
-			count.thTimes = new([carMax]carTime)
+			c.saveData()
+			c.thCount = new([carMax][totalCol]bool)
+			c.thTimes = new([carMax]carTime)
 			log.Println("All data cleared")
 		} else {
 			// clear car
 			for i := 0; i < totalCol; i++ {
-				count.thCount[car][i] = false
+				c.thCount[car][i] = false
 			}
 			log.Printf("Car %v data cleared", car)
 		}
 	case "SAVE":
-		saveData(count)
+		c.saveData()
 	case "STATUS":
-		status(count)
+		c.status()
 	case "CL": // Clue
 		clue := features[2][0] // get the first character
 		clue = clue - 64
-		count.thCount[car][clueOffset+clue] = true
-		count.scanTime[car] = time.Now()
+		c.thCount[car][clueOffset+clue] = true
+		c.scanTime[car] = time.Now()
 	case "EM": // Emergency
 		emergency, _ := strconv.Atoi(features[2])
-		count.thCount[car][emergency] = true
-		count.scanTime[car] = time.Now()
+		c.thCount[car][emergency] = true
+		c.scanTime[car] = time.Now()
 	case "CA": // Car
 		switch *thCommand {
 		case "count":
-			emergencies, clues := getSolveCount(count, car)
+			emergencies, clues := c.getSolveCount(car)
 			/*
 				emergencies := 0
 				clues := 0
@@ -383,23 +420,43 @@ func processCode(count *countData, code string) bool {
 			//log.Printf("car: %v emergency result %v clue result %v\n", car, getCarEmergencies(car), getCarClues(car))
 			fmt.Println("--------------------")
 			fmt.Printf("Car: %v scans: emergencies: %v \t clues: %v\n", car, emergencies, clues)
-			fmt.Printf("Car: %v emergencies opened (%v): %v \n", car, clueNum-emergencies, getCarEmergencies(count, car))
-			fmt.Printf("Car: %v clues visited (%v): %v\n", car, clueNum-clues, getCarClues(count, car))
+			fmt.Printf("Car: %v emergencies opened (%v): %v \n", car, clueNum-emergencies, c.getCarEmergencies(car))
+			fmt.Printf("Car: %v clues visited (%v): %v\n", car, clueNum-clues, c.getCarClues(car))
 		case "checkin":
-			count.thTimes[car].checkIn = time.Now()
-			log.Printf("Car %v check-in time: %v\n", car, count.thTimes[car].checkIn.Format("15:04:05"))
+			c.thTimes[car].checkIn = time.Now()
+			log.Printf("Car %v check-in time: %v\n", car, c.thTimes[car].checkIn.Format("15:04:05"))
 		case "checkout":
-			count.thTimes[car].checkOut = time.Now()
-			log.Printf("Car %v check-out time: %v\n", car, count.thTimes[car].checkOut.Format("15:04:05"))
+			c.thTimes[car].checkOut = time.Now()
+			log.Printf("Car %v check-out time: %v\n", car, c.thTimes[car].checkOut.Format("15:04:05"))
 		}
 	}
 	return true
+}
+
+func (c *countData) getTally() TallyData {
+	var tally TallyData
+	tally.TotalClues = carMax * clueNum
+	tally.TotalEmergencies = tally.TotalClues
+	for i := 0; i < carMax; i++ {
+		for j := 0; j < clueNum; j++ {
+			if c.thCount[i][j] == true {
+				tally.CountedEmergencies++
+			}
+		}
+		for j := clueOffset; j < totalCol; j++ {
+			if c.thCount[i][j] == true {
+				tally.CountedClues++
+			}
+		}
+	}
+	return tally
 }
 
 func worker(s *serial.Port, codes chan string, workerId int, count *countData) {
 	errorCount := 0
 	buf := make([]byte, 256)
 	lastVal := ""
+	count.scanners[workerId].ScannerNum = workerId
 	for {
 		if quit {
 			return
@@ -426,17 +483,32 @@ func worker(s *serial.Port, codes chan string, workerId int, count *countData) {
 		code := string(buf[:n])
 		//code = strings.TrimSuffix(code, "\r")
 		//code = strings.TrimSuffix(code, "\n")
-		code = strings.TrimSpace(code)
+		//code = strings.TrimSpace(code)
 		if len(code) == 0 {
 			continue
 		}
+		count.scanners[workerId].LastScanTime = time.Now()
 		code = lastVal + code
-		//log.Printf("[%v]length: %v data: %q code: %v codeLen: %v\n", workerId, n, buf[:n], code, len(code))
-		valid := processCode(count, code)
-		if valid {
-			lastVal = ""
-		} else {
-			lastVal += code
+		if count.debug {
+			log.Printf("[%v]length: %v data: %q code: %v codeLen: %v\n", workerId, n, buf[:n], code, len(code))
+		}
+		codes := strings.Split(code, "\n")
+		for i, v := range codes {
+			v = strings.TrimSpace(v)
+			valid := count.processCode(v)
+			if valid {
+				count.scanners[workerId].ScanCount++
+			}
+			if count.debug {
+				log.Printf("Code: %v, Len: %v, Current: %v, Valid: %v\n", v, len(codes), i, valid)
+			}
+			if i == len(codes)-1 {
+				if valid {
+					lastVal = ""
+				} else {
+					lastVal = v
+				}
+			}
 		}
 		//data = append(data, buf[:n]...)
 		//codes <- code
@@ -448,31 +520,31 @@ func init() {
 	thCommand = flag.String("command", "count", "Current command")
 }
 
-func readState(count *countData) {
-	_, err := os.Stat(carStateFile)
+func (c *countData) readState(carFilename string, timeFilename string) {
+	_, err := os.Stat(carFilename)
 	if os.IsNotExist(err) {
 		// doesn't exist; initialize it
 		//componentClasses = make([]componentClass, 0)
 	} else {
 		// read metadata from file
-		byteValue, _ := ioutil.ReadFile(carStateFile)
+		byteValue, _ := ioutil.ReadFile(carFilename)
 
-		// we unmarshal our byteArray which contains our
+		// Unmarshal our byteArray which contains the
 		// jsonFile's content into 'users' which we defined above
-		json.Unmarshal(byteValue, &count.thCount)
+		json.Unmarshal(byteValue, &c.thCount)
 	}
 
-	_, err = os.Stat(timeStateFile)
+	_, err = os.Stat(timeFilename)
 	if os.IsNotExist(err) {
 		// doesn't exist; initialize it
 		//componentClasses = make([]componentClass, 0)
 	} else {
 		// read metadata from file
-		byteValue, _ := ioutil.ReadFile(timeStateFile)
+		byteValue, _ := ioutil.ReadFile(timeFilename)
 
 		// we unmarshal our byteArray which contains our
 		// jsonFile's content into 'users' which we defined above
-		json.Unmarshal(byteValue, &count.thTimes)
+		json.Unmarshal(byteValue, &c.thTimes)
 	}
 
 }
@@ -609,6 +681,7 @@ func main() {
 	count.thCount = new([carMax][totalCol]bool)
 	count.thTimes = new([carMax]carTime)
 	count.scanTime = new([carMax]time.Time)
+	count.scanners = new([scannerMax]ScannerData)
 
 	flag.Parse()
 	fmt.Println("Command: ", *thCommand)
@@ -624,7 +697,7 @@ func main() {
 	mw := io.MultiWriter(os.Stdout, f)
 	log.SetOutput(mw)
 
-	readState(&count)
+	count.readState(carStateFile, timeStateFile)
 
 	osType := runtime.GOOS
 	var patterns []string

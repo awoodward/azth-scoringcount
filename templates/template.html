@@ -1,6 +1,26 @@
 <h1>{{.Title}}</h1>
 <div>
-    <a href="/download">Download</a>
+    <table>
+    <tr>
+    <td><a href="/download">Download</a></td><td><a href="/save">Save</a></td>
+    </tr>
+</table>
+</div>
+<div>
+    <table>
+        <tr>
+            <td>Total Clues:</td><td>{{.Tally.TotalClues}}</td>
+        </tr>
+        <tr>
+            <td>Counted Clues:</td><td>{{.Tally.CountedClues}}</td>
+        </tr>
+        <tr>
+            <td>Total Emergencies:</td><td>{{.Tally.TotalEmergencies}}</td>
+        </tr>
+        <tr>
+            <td>Counted Emergencies:</td><td>{{.Tally.CountedEmergencies}}</td>
+        </tr>
+    </table>
 </div>
 <div>
     <table>
@@ -32,6 +52,22 @@
         {{end}}
     </table>
 </div>
+<div>
+    <table>
+        <tr>
+            <th>Scanner</th>
+            <th>Count</th>
+            <th>Last Scan</th>
+        </tr>
+        {{range .Scanners}}
+        <tr class="done">
+            <td>{{.ScannerNum}}</td>
+            <td>{{.ScanCount}}</td>
+            <td>{{.LastScanTime.Format "Jan 02, 2006 15:04:05" }}</td>
+        </tr>
+        {{end}}
+    </table>
+</div>
 
 <style>
     table,
@@ -39,6 +75,7 @@
     td {
         border: 1px solid black;
         border-collapse: collapse;
+        padding: 10px;
     }
     .notdone {
         background-color: tomato;
