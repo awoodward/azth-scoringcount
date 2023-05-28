@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <!-- CSS only -->
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.6/dist/umd/popper.min.js"
+        integrity="sha384-oBqDVmMz9ATKxIep9tiCxS/Z9fNfEXiDAYTujMAeBAsjFuCZSmKbSSUnQlmh/jp3"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.min.js"
+        integrity="sha384-cuYeSxntonz0PPNlHhBs68uyIAVpIIOZZ5JqeqvYYIcEL727kskC66kF92t6Xl2V"
+        crossorigin="anonymous"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.2/font/bootstrap-icons.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <h1>Edit Car {{.CarNum}}</h1>
+            </div>
+        </div>
+        <form action="/updateCar" method="POST">
+            <div class="row">
+                <div class="col">
+                    <h2>Clues</h2>
+                </div>
+            </div>
+            <input type="hidden" id="car" name="car" value="{{.CarNum}}">
+            <div class="row">
+                <table class="table">
+                    <tr>
+                        {{range $index, $value := .Clues }}
+                        <th scope="col">{{inc $index}}</th>
+                        {{end}}
+                    </tr>
+                    <tr>
+                        {{range $index, $value := .Clues }}
+                        {{ if $value }}
+                        <td><input type="checkbox" id="clue{{$index}}" name="clue{{$index}}" value="true" checked></td>
+                        {{else}}
+                        <td><input type="checkbox" id="clue{{$index}}" name="clue{{$index}}" value="true"></td>
+                        {{end}}
+                        {{end}}
+                    </tr>
+                </table>
+            </div>
+            <div class="row">
+                <div class="col">
+                    <h2>Emergencies</h2>
+                </div>
+            </div>
+            <div class="row">
+                <table class="table">
+                    <tr>
+                        {{range $index, $value := .Emergencies }}
+                        <th scope="col">{{inc $index}}</th>
+                        {{end}}
+                    </tr>
+                    <tr>
+                        {{range $index, $value := .Emergencies }}
+                        {{ if $value }}
+                        <td><input type="checkbox" id="emergency{{$index}}" name="emergency{{$index}}" value="true"
+                                checked></td>
+                        {{else}}
+                        <td><input type="checkbox" id="emergency{{$index}}" name="emergency{{$index}}" value="true">
+                        </td>
+                        {{end}}
+                        {{end}}
+                    </tr>
+                </table>
+            </div>
+            <a class="btn btn-primary" href="/" role="button">Cancel</a><button type="submit"
+                class="btn btn-success">Update</button>
+        </form>
+    </div>
+</body>

@@ -1,9 +1,13 @@
+//go:build !windows
+// +build !windows
+
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
@@ -18,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/tarm/serial"
@@ -58,6 +61,7 @@ type TallyData struct {
 	CountedClues       int
 	TotalEmergencies   int
 	CountedEmergencies int
+	LastSaved          time.Time
 }
 
 type ScannerData struct {
@@ -76,14 +80,40 @@ type CarPageData struct {
 //var thTimes *[carMax]carTime
 
 type countData struct {
-	debug    bool
-	thCount  *[carMax][totalCol]bool
-	scanTime *[carMax]time.Time
-	thTimes  *[carMax]carTime
-	scanners *[scannerMax]ScannerData
+	debug     bool
+	thCount   *[carMax][totalCol]bool
+	scanTime  *[carMax]time.Time
+	thTimes   *[carMax]carTime
+	edited    *[carMax]bool
+	scanners  *[scannerMax]ScannerData
+	lastSaved time.Time
 }
 
+type EditPageData struct {
+	CarNum      int
+	Clues       [clueNum]bool
+	Emergencies [clueNum]bool
+}
+
+const (
+	usage = `usage: %s
+
+Program for barcode counting clue sheets and emergencies at check-in
+for Arizona Treasure Hunt
+Written by: Andy Woodward - TH Committee 2019-2022
+Email: awoodward@gmail.com
+
+Options:
+`
+)
+
 func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == "/favicon.ico" {
+		// just in case we want to send a favicon at some point
+		http.ServeFile(w, req, "images/favicon.ico")
+		return
+	}
+
 	c.status()
 	query := req.URL.Path
 
@@ -100,6 +130,53 @@ func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if strings.HasPrefix(query, "/save") {
 		c.saveData()
+		http.Redirect(w, req, "/", http.StatusSeeOther)
+		return
+	}
+
+	if strings.HasPrefix(query, "/edit") {
+		carStr := req.URL.Query().Get("car")
+		car, err := strconv.Atoi(carStr)
+		if err == nil && car > 0 && car < carMax {
+			editData := c.getCarEditData(car)
+			funcs := template.FuncMap{
+				"inc": func(i int) int {
+					return i + 1
+				},
+			}
+			_ = funcs
+			tmpl := template.New("edit.html").Funcs(funcs)
+			tmpl, err = tmpl.ParseFiles("templates/edit.html")
+			tmpl.Execute(w, editData)
+			return
+		}
+	}
+
+	if strings.HasPrefix(query, "/updateCar") {
+		req.ParseForm()
+		carStr := req.FormValue("car")
+		car, err := strconv.Atoi(carStr)
+		if err == nil && car > 0 && car < carMax {
+			var editData EditPageData
+			editData.CarNum = car
+			for i := 0; i < len(editData.Clues); i++ {
+				val := req.FormValue(fmt.Sprintf("clue%v", i))
+				if len(val) > 0 {
+					editData.Clues[i], _ = strconv.ParseBool(val)
+					c.thCount[car][0] = true
+				}
+			}
+			for i := 0; i < len(editData.Emergencies); i++ {
+				val := req.FormValue(fmt.Sprintf("emergency%v", i))
+				if len(val) > 0 {
+					editData.Emergencies[i], _ = strconv.ParseBool(val)
+					c.thCount[car][0] = true
+				}
+			}
+			c.parseCarEditData(editData)
+			log.Printf("Car %v has been edited\n", car)
+		}
+		http.Redirect(w, req, "/", http.StatusSeeOther)
 		return
 	}
 
@@ -131,22 +208,40 @@ func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return carData.Cars[i].Emergencies < carData.Cars[j].Emergencies
 		})
 	}
+
 	//log.Printf("Sort: %v\n", sortOrder)
 	tmpl := template.Must(template.ParseFiles("templates/template.html"))
 	tmpl.Execute(w, carData)
 }
 
-const (
-	usage = `usage: %s
+func (c *countData) parseCarEditData(editData EditPageData) {
+	count := 0
+	for i := 1 + emergencyOffset; i <= clueNum; i++ {
+		c.thCount[editData.CarNum][i] = editData.Emergencies[count]
+		count++
+	}
+	count = 0
+	for i := 1 + clueOffset; i <= clueNum+clueOffset; i++ {
+		c.thCount[editData.CarNum][i] = editData.Clues[count]
+		count++
+	}
+}
 
-Program for barcode counting clue sheets and emergencies at check-in
-for Arizona Treasure Hunt
-Written by: Andy Woodward - TH Committee 2019-2022
-Email: awoodward@gmail.com
-
-Options:
-`
-)
+func (c *countData) getCarEditData(car int) EditPageData {
+	var editData EditPageData
+	editData.CarNum = car
+	count := 0
+	for i := 1 + emergencyOffset; i <= clueNum; i++ {
+		editData.Emergencies[count] = c.thCount[car][i]
+		count++
+	}
+	count = 0
+	for i := 1 + clueOffset; i <= clueNum+clueOffset; i++ {
+		editData.Clues[count] = c.thCount[car][i]
+		count++
+	}
+	return editData
+}
 
 func (c *countData) getCarEmergencies(car int) string {
 	// process emergencies
@@ -332,6 +427,7 @@ func (c *countData) saveData() {
 	}
 
 	f.Close()
+	c.lastSaved = time.Now()
 	log.Printf("Data saved to file: %v\n", filename)
 }
 
@@ -449,6 +545,7 @@ func (c *countData) getTally() TallyData {
 			}
 		}
 	}
+	tally.LastSaved = c.lastSaved
 	return tally
 }
 
@@ -681,6 +778,7 @@ func main() {
 	count.thCount = new([carMax][totalCol]bool)
 	count.thTimes = new([carMax]carTime)
 	count.scanTime = new([carMax]time.Time)
+	count.edited = new([carMax]bool)
 	count.scanners = new([scannerMax]ScannerData)
 
 	flag.Parse()
