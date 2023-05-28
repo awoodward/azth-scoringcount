@@ -21,6 +21,12 @@
                 <h1>Edit Car {{.CarNum}}</h1>
             </div>
         </div>
+        <div class="row">
+            <div class="col">
+        <a class="btn btn-danger" href="/clearCar?car={{.CarNum}}" role="button" onclick="return confirm('Are you sure you want to clear car {{.CarNum}}?')">Clear Car</a>
+    </div>
+</div>
+
         <form action="/updateCar" method="POST">
             <div class="row">
                 <div class="col">
@@ -71,8 +77,8 @@
                     </tr>
                 </table>
             </div>
-            <a class="btn btn-primary" href="/" role="button">Cancel</a><button type="submit"
-                class="btn btn-success">Update</button>
+            <a class="btn btn-primary" href="/" role="button">Cancel</a>
+            <button type="submit" class="btn btn-success" onclick="return confirm('Are you sure you want to update car {{.CarNum}}?')">Update</button>
         </form>
     </div>
 </body>

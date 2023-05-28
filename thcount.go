@@ -134,9 +134,9 @@ func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	carStr := req.FormValue("car")
+	car, err := strconv.Atoi(carStr)
 	if strings.HasPrefix(query, "/edit") {
-		carStr := req.URL.Query().Get("car")
-		car, err := strconv.Atoi(carStr)
 		if err == nil && car > 0 && car < carMax {
 			editData := c.getCarEditData(car)
 			funcs := template.FuncMap{
@@ -154,8 +154,6 @@ func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if strings.HasPrefix(query, "/updateCar") {
 		req.ParseForm()
-		carStr := req.FormValue("car")
-		car, err := strconv.Atoi(carStr)
 		if err == nil && car > 0 && car < carMax {
 			var editData EditPageData
 			editData.CarNum = car
@@ -175,6 +173,14 @@ func (c *countData) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 			c.parseCarEditData(editData)
 			log.Printf("Car %v has been edited\n", car)
+		}
+		http.Redirect(w, req, "/", http.StatusSeeOther)
+		return
+	}
+
+	if strings.HasPrefix(query, "/clearCar") {
+		if err == nil && car > 0 && car < carMax {
+			c.clearCar(car)
 		}
 		http.Redirect(w, req, "/", http.StatusSeeOther)
 		return
@@ -446,6 +452,13 @@ func (c *countData) getSolveCount(car int) (int, int) {
 	return emergencies, clues
 }
 
+func (c *countData) clearCar(car int) {
+	for i := 0; i < totalCol; i++ {
+		c.thCount[car][i] = false
+	}
+	log.Printf("Car %v data cleared", car)
+}
+
 func (c *countData) processCode(code string) bool {
 	if len(code) == 0 {
 		// Windows seems to return a zero length string
@@ -477,10 +490,7 @@ func (c *countData) processCode(code string) bool {
 			log.Println("All data cleared")
 		} else {
 			// clear car
-			for i := 0; i < totalCol; i++ {
-				c.thCount[car][i] = false
-			}
-			log.Printf("Car %v data cleared", car)
+			c.clearCar(car)
 		}
 	case "SAVE":
 		c.saveData()
@@ -860,9 +870,9 @@ func main() {
 	myIp := GetOutboundIP()
 	fmt.Printf("listen on http://%v:8080\n", myIp)
 	mux := http.NewServeMux()
-	//mux.HandleFunc("/", getRoot)
+
 	mux.Handle("/", &count)
-	//mux.HandleFunc("/download", getDownload)
+
 	wg.Add(1)
 	go func(mux *http.ServeMux) {
 		defer wg.Done()
